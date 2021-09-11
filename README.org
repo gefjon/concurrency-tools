@@ -1,0 +1,79 @@
+#+title: concurrency-tools: more synchronization primitives
+#+author: Phoebe Goldman
+
+Note: at present, these are implemented directly in terms of SBCL's ~sb-thread~, rather
+than a portable library like ~bordeaux-threads~. I would accept PRs to make this library
+portable across implementations.
+* ~shared-cell~
+  A mutex which is explicitly associated with the shared resource to which accesses are
+  synchronized.
+
+  Construct them with ~(make-shared-cell OBJECT)~.
+
+  Access them with ~(with-shared-cell (ACCESSOR CELL) BODY...)~. Within the ~BODY~ forms,
+  ~ACCESSOR~ will be bound as a symbol-macro to a reader and writer for the value stored
+  in the ~CELL~.
+** what not to do
+  Exfiltrating a mutable object from a shared cell is undefined behavior; that is, the
+  contents of the cell must only ever be accessed via the ~with-shared-cell~ macro.
+
+  Common Lisp doesn't provide us a mechanism for detecting or preventing these errors, so
+  just don't do it.
+
+  For example, the following invokes undefined behavior:
+
+  #+begin_src lisp
+    (defparameter *cell* (make-shared-cell (make-array 128 :initial-element 0)))
+
+    (defparameter *illegal-unsynchronized-reference*
+      (with-shared-cell (value *cell*)
+        value))
+
+    (setf (aref *illegal-unsynchronized-reference* 0)
+          1)
+  #+end_src
+
+  Replacing a value in a shared cell and returning the old value is acceptable,
+  though. The following is fine:
+
+  #+begin_src lisp
+    (defparameter *cell* (make-shared-cell (make-array 128 :initial-element 0)))
+
+    (defparameter *fine-unique-reference*
+      (with-shared-cell (value *cell*)
+        (prog1 value
+          (setf value (make-array 64 :initial-element 1)))))
+
+    (setf (aref *fine-unique-reference* 0) 1)
+  #+end_src
+* ~once-cell~
+  A thunk that is evaluated only once.
+
+  The implementation is not particularly optimized; particularly, it needlessly grabs a
+  mutex on every read. It should be possible to test whether the cell is initialized
+  without synchronizing, and fall back to waiting on a condition variable only if the cell
+  is uninitialized.
+** constructing them
+   The function ~(make-once-cell FUNCTION)~, where ~FUNCTION~ is a function from no
+   arguments to one value, constructs a ~once-cell~.
+
+   The macro ~(once-cell BODY...)~ expands to ~(make-once-cell (lambda () ...BODY))~.
+** accessing them
+   The function ~(once-cell-get CELL)~ returns the value stored in ~CELL~, computing it or
+   blocking as appropriate.
+** other macros
+   The macro ~(once BODY...)~ evaluates ~BODY~ once and returns its value subsequent
+   times. ~BODY~ cannot close over a lexical environment, and likely should not depend on
+   a particular dynamic environment.
+* ~rwlock~
+  A ~shared-cell~ which allows multiple concurrent readers, or a single writer.
+
+  The interface is similar to that of ~shared-cell~: ~(make-rwlock OBJECT)~ constructs a
+  ~rwlock~, ~(with-writing (ACCESSOR RWLOCK) BODY...)~ evaluates ~BODY~ with a unique lock
+  held for writing, and ~(with-reading (ACCESSOR RWLOCK) BODY...)~ evaluated ~BODY~ with a
+  shared lock held for reading.
+
+  Common Lisp provides no facility for detecting or preventing erroneous writes within a
+  ~with-reading~ form, so just don't do that.
+
+  As with ~shared-cell~, also don't leak references to objects contained in the ~rwlock~.
